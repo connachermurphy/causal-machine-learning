@@ -1,2 +1,2 @@
 # causal-machine-learning
-We implement the framework proposed in "Deep Learning for Individual Heterogeneity: An Automatic Inference Framework" by Max H. Farrell, Tengyuan Liang, and Sanjog Misra.
+We implement the framework proposed in ["Deep Learning for Individual Heterogeneity: An Automatic Inference Framework"](https://arxiv.org/abs/2010.14694) by Max H. Farrell, Tengyuan Liang, and Sanjog Misra. We began this implementation during the "Causal Machine Learning" course offered by Max H. Farrell and Sanjog Misra in the fall of 2023.

@@ -1,5 +1,9 @@
 import numpy as np
+import torch
 import torch.nn as nn
+import torch.autograd as autograd
+import torch.optim as optim
+import torch.linalg as linalg
 from tqdm import tqdm  # ascii progress bar
 
 
@@ -25,7 +29,7 @@ class DeepNeuralNetworkReLU(nn.Module):
         return x
 
 
-# take model as input
+# A somewhat flexible training function
 def train_dnn(
     dnn_features,
     structural_features,
@@ -35,7 +39,7 @@ def train_dnn(
     loss_function,
     optimizer,
     num_epochs,
-    noisily = False,
+    noisily=False,
 ):
     loss_history = []  # keep track of the loss at each epoch
 
@@ -60,11 +64,172 @@ def train_dnn(
 
         # Store loss
         loss_history.append(float(loss))
-        
+
         # add a noisily option:
         if noisily:
             # Print the loss every 10 epochs
             if (epoch + 1) % 10 == 0:
-                    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+                print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}")
 
     return model
+
+
+# We don't need a structural layer for Lambda, so we just use the identity function
+def identity(structural_parameters, structural_features):
+    return structural_parameters
+
+
+# Estimate conditional expectation of the Hessian for a given split and structural parameter DNN
+def estimate_expected_hessian(
+    splits,
+    split,
+    models_structural_parameters,
+    model_sp,
+    loss_function,
+    structural_layer,
+    hidden_sizes,
+    dropout_rate,
+    learning_rate,
+    weight_decay,
+    num_epochs,
+):
+    print(f"Split {split + 1} with structural parameter DNN {model_sp + 1}")
+
+    # Number of observations in the split
+    N = splits[split]["dnn_features"].size(0)
+
+    # Number of DNN features
+    dnn_features_dim = splits[split]["dnn_features"].size(1)
+
+    # Evaluate the structural parameters on <split>, using the DNN from <model>
+    structural_parameters = models_structural_parameters[model_sp](
+        splits[split]["dnn_features"]
+    )
+    structural_parameters_dim = structural_parameters.size(1)
+
+    # Predict outcomes for <split>
+    outcomes_est = structural_layer(
+        structural_parameters, splits[split]["structural_features"]
+    )
+
+    # Calculate loss
+    loss = loss_function(outcomes_est, splits[split]["outcomes"])
+
+    # Take the gradient of the loss w.r.t. to the structural parameters
+    loss_grad = autograd.grad(
+        loss, structural_parameters, create_graph=True, retain_graph=True
+    )[0]
+
+    # Initialize Hessian
+    loss_hessian = torch.zeros(
+        [N, structural_parameters_dim, structural_parameters_dim]
+    )
+
+    # Iterate over the elements of the Hessian
+    # We can just calculate the upper triangle and reflect to the lower triangle
+    for k in range(structural_parameters_dim):
+        loss_hessian_row = autograd.grad(
+            loss_grad[:, k].sum(), structural_parameters, retain_graph=True
+        )[0]
+
+        for j in range(k, structural_parameters_dim):
+            print(f"Element ({k}, {j})")
+
+            # Extract Hessian element (k,j)
+            loss_hessian_element = loss_hessian_row[:, j].view(N, 1)
+
+            # Initialize neural network
+            model = DeepNeuralNetworkReLU(
+                input_dim=dnn_features_dim,
+                hidden_sizes=hidden_sizes,
+                output_dim=1,
+                dropout_rate=dropout_rate,
+            )
+
+            # Initialize optimizer; we use stochastic gradient descent
+            optimizer = optim.SGD(
+                model.parameters(), lr=learning_rate, weight_decay=weight_decay
+            )
+
+            loss_hessian_element_projection = train_dnn(
+                splits[split]["dnn_features"],
+                splits[split]["structural_features"],
+                loss_hessian_element,
+                identity,  # no structural layer for the hessian elements
+                model,
+                nn.MSELoss(reduction="mean"),
+                optimizer,
+                num_epochs,
+                noisily=False,
+            )
+
+            # Store projection
+            loss_hessian[:, k, j] = loss_hessian_element_projection(
+                splits[split]["dnn_features"]
+            ).view(N)
+
+            if k != j:  # reflect upper triangle to lower triangle
+                print(f"Reflecting to element ({j}, {k})")
+                loss_hessian[:, j, k] = loss_hessian[:, k, j]
+
+    print("\n")
+    return loss_hessian
+
+
+def estimate_influence_function(
+    splits,
+    split,
+    models_structural_parameters,
+    model_sp,
+    loss_function,
+    models_expected_hessians,
+    model_eh,
+    structural_layer,
+    statistic,
+):
+    # Number of observations in the split
+    N = splits[split]["dnn_features"].size(0)
+
+    # Evaluate the structural parameters on <split>, using the DNN from <model>
+    structural_parameters = models_structural_parameters[model_sp](
+        splits[split]["dnn_features"]
+    )
+    structural_parameters_dim = structural_parameters.size(1)
+
+    # Predict outcomes for <split>
+    outcomes_est = structural_layer(
+        structural_parameters, splits[split]["structural_features"]
+    )
+    
+    # Calculate loss
+    loss = loss_function(outcomes_est, splits[split]["outcomes"])
+    
+    # Take the gradient of the loss w.r.t. to the structural parameters
+    loss_grad = autograd.grad(
+        loss, structural_parameters, create_graph=True, retain_graph=True
+    )[0].view(N, structural_parameters_dim)
+
+    # Evaluate statistic
+    statistic_est = statistic(
+        splits[split]["dnn_features"],
+        structural_parameters,
+        splits[split]["structural_features"],
+    )
+    statistic_dim = statistic_est.size(1)
+    
+    # Calculate the gradient of the statistic w.r.t. the structural parameters
+    # CM: I need to accommodate a multivariate statistic
+    statistic_grad = autograd.grad(
+        statistic_est.sum(), structural_parameters, create_graph=True
+    )[0].view(N, structural_parameters_dim)
+    
+    # Calculate the influence function
+    influence_function_est = statistic_est - torch.matmul(
+        torch.matmul(
+            statistic_grad.view(N, statistic_dim, structural_parameters_dim),
+            linalg.pinv(models_expected_hessians[model_eh]),
+        ).view(N, statistic_dim, structural_parameters_dim),
+        loss_grad.view(N, structural_parameters_dim, statistic_dim),
+    ).view(N, statistic_dim)
+
+    return influence_function_est

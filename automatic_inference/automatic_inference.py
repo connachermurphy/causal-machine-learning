@@ -39,6 +39,7 @@ def train_dnn(
     loss_function,
     optimizer,
     num_epochs,
+    include_loss_history=False,
     noisily=False,
 ):
     loss_history = []  # keep track of the loss at each epoch
@@ -71,7 +72,7 @@ def train_dnn(
             if (epoch + 1) % 10 == 0:
                 print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}")
 
-    return model
+    return (model, loss_history) if include_loss_history else model
 
 
 # We don't need a structural layer for Lambda, so we just use the identity function
@@ -160,7 +161,6 @@ def estimate_expected_hessian(
                 nn.MSELoss(reduction="mean"),
                 optimizer,
                 num_epochs,
-                noisily=False,
             )
 
             # Store projection

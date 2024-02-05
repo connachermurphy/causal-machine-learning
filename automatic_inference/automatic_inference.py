@@ -7,6 +7,31 @@ import torch.linalg as linalg
 from tqdm import tqdm  # ascii progress bar
 
 
+# Early stopping class: https://stackoverflow.com/questions/71998978/early-stopping-in-pytorch
+class EarlyStopper:
+    def __init__(self, patience=1, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_validation_loss = float("inf")
+
+    # returns True if we should stop training, False otherwise
+    def early_stop(self, validation_loss):
+        # If validation loss is lower than the minimum validation loss, reset the counter
+        if validation_loss < self.min_validation_loss:
+            self.min_val_loss = validation_loss
+            self.counter = 0
+
+        # If validation loss is higher than the minimum validation loss + the delta adjustment
+        # increment the counter
+        elif validation_loss > (self.min_validation_loss + self.min_delta):
+            self.counter += 1
+            # If counter is greater than patience, return True
+            if self.counter >= self.patience:
+                return True
+        return False
+
+
 # Create a class for a DNN with ReLU activation, dropout layers, and Kaiming initialization
 class DeepNeuralNetworkReLU(nn.Module):
     def __init__(self, input_dim, hidden_sizes, output_dim, dropout_rate):
@@ -200,10 +225,10 @@ def estimate_influence_function(
     outcomes_est = structural_layer(
         structural_parameters, splits[split]["structural_features"]
     )
-    
+
     # Calculate loss
     loss = loss_function(outcomes_est, splits[split]["outcomes"])
-    
+
     # Take the gradient of the loss w.r.t. to the structural parameters
     loss_grad = autograd.grad(
         loss, structural_parameters, create_graph=True, retain_graph=True
@@ -216,13 +241,13 @@ def estimate_influence_function(
         splits[split]["structural_features"],
     )
     statistic_dim = statistic_est.size(1)
-    
+
     # Calculate the gradient of the statistic w.r.t. the structural parameters
     # CM: I need to accommodate a multivariate statistic
     statistic_grad = autograd.grad(
         statistic_est.sum(), structural_parameters, create_graph=True
     )[0].view(N, structural_parameters_dim)
-    
+
     # Calculate the influence function
     influence_function_est = statistic_est - torch.matmul(
         torch.matmul(
